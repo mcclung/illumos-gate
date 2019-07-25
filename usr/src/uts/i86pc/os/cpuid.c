@@ -1039,7 +1039,9 @@ static char *x86_feature_names[NUM_X86_FEATURES] = {
 	"avx512_vnni",
 	"amd_pcec",
 	"mb_clear",
-	"mds_no"
+	"mds_no",
+	"core_thermal",
+	"pkg_thermal"
 };
 
 boolean_t
@@ -2022,18 +2024,27 @@ cpuid_amd_getids(cpu_t *cpu, uchar_t *features)
 	cpi->cpi_clogid = cpi->cpi_apicid & ((1 << coreidsz) - 1);
 
 	/*
-	 * The package core ID varies depending on the family. For family 17h,
-	 * we can get this directly from leaf CPUID_LEAF_EXT_1e. Otherwise, we
-	 * can use the clogid as is. When family 17h is virtualized, the clogid
-	 * should be sufficient as if we don't have valid data in the leaf, then
-	 * we won't think we have SMT, in which case the cpi_clogid should be
+	 * The package core ID varies depending on the family. While it may be
+	 * tempting to use the CPUID_LEAF_EXT_1e %ebx core id, unfortunately,
+	 * this value is the core id in the given node. For non-virtualized
+	 * family 17h, we need to take the logical core id and shift off the
+	 * threads like we do when getting the core id.  Otherwise, we can use
+	 * the clogid as is. When family 17h is virtualized, the clogid should
+	 * be sufficient as if we don't have valid data in the leaf, then we
+	 * won't think we have SMT, in which case the cpi_clogid should be
 	 * sufficient.
 	 */
 	if (cpi->cpi_family >= 0x17 &&
 	    is_x86_feature(x86_featureset, X86FSET_TOPOEXT) &&
 	    cpi->cpi_xmaxeax >= CPUID_LEAF_EXT_1e &&
 	    cpi->cpi_extd[0x1e].cp_ebx != 0) {
-		cpi->cpi_pkgcoreid = BITX(cpi->cpi_extd[0x1e].cp_ebx, 7, 0);
+		uint_t nthreads = BITX(cpi->cpi_extd[0x1e].cp_ebx, 15, 8) + 1;
+		if (nthreads > 1) {
+			VERIFY3U(nthreads, ==, 2);
+			cpi->cpi_pkgcoreid = cpi->cpi_clogid >> 1;
+		} else {
+			cpi->cpi_pkgcoreid = cpi->cpi_clogid;
+		}
 	} else {
 		cpi->cpi_pkgcoreid = cpi->cpi_clogid;
 	}
@@ -2499,6 +2510,41 @@ cpuid_pass1_topology(cpu_t *cpu, uchar_t *featureset)
 			cpi->cpi_compunitid = cpi->cpi_coreid;
 			break;
 		}
+	}
+}
+
+/*
+ * Gather relevant CPU features from leaf 6 which covers thermal information. We
+ * always gather leaf 6 if it's supported; however, we only look for features on
+ * Intel systems as AMD does not currently define any of the features we look
+ * for below.
+ */
+static void
+cpuid_pass1_thermal(cpu_t *cpu, uchar_t *featureset)
+{
+	struct cpuid_regs *cp;
+	struct cpuid_info *cpi = cpu->cpu_m.mcpu_cpi;
+
+	if (cpi->cpi_maxeax < 6) {
+		return;
+	}
+
+	cp = &cpi->cpi_std[6];
+	cp->cp_eax = 6;
+	cp->cp_ebx = cp->cp_ecx = cp->cp_edx = 0;
+	(void) __cpuid_insn(cp);
+	platform_cpuid_mangle(cpi->cpi_vendor, 6, cp);
+
+	if (cpi->cpi_vendor != X86_VENDOR_Intel) {
+		return;
+	}
+
+	if ((cp->cp_eax & CPUID_INTC_EAX_DTS) != 0) {
+		add_x86_feature(featureset, X86FSET_CORE_THERMAL);
+	}
+
+	if ((cp->cp_eax & CPUID_INTC_EAX_PTM) != 0) {
+		add_x86_feature(featureset, X86FSET_PKG_THERMAL);
 	}
 }
 
@@ -3340,6 +3386,7 @@ cpuid_pass1(cpu_t *cpu, uchar_t *featureset)
 	}
 
 	cpuid_pass1_topology(cpu, featureset);
+	cpuid_pass1_thermal(cpu, featureset);
 
 	/*
 	 * Synthesize chip "revision" and socket type
@@ -3400,13 +3447,13 @@ cpuid_pass2(cpu_t *cpu)
 	 * (We already handled n == 0 and n == 1 in pass 1)
 	 */
 	for (n = 2, cp = &cpi->cpi_std[2]; n < nmax; n++, cp++) {
-		cp->cp_eax = n;
-
 		/*
-		 * n == 7 was handled in pass 1
+		 * leaves 6 and 7 were handled in pass 1
 		 */
-		if (n == 7)
+		if (n == 6 || n == 7)
 			continue;
+
+		cp->cp_eax = n;
 
 		/*
 		 * CPUID function 4 expects %ecx to be initialized
@@ -6548,7 +6595,7 @@ cpuid_arat_supported(void)
 		if (cpi->cpi_maxeax >= 6) {
 			regs.cp_eax = 6;
 			(void) cpuid_insn(NULL, &regs);
-			return (regs.cp_eax & CPUID_CSTATE_ARAT);
+			return (regs.cp_eax & CPUID_INTC_EAX_ARAT);
 		} else {
 			return (0);
 		}
@@ -6582,7 +6629,7 @@ cpuid_iepb_supported(struct cpu *cp)
 
 	regs.cp_eax = 0x6;
 	(void) cpuid_insn(NULL, &regs);
-	return (regs.cp_ecx & CPUID_EPB_SUPPORT);
+	return (regs.cp_ecx & CPUID_INTC_ECX_PERFBIAS);
 }
 
 /*
