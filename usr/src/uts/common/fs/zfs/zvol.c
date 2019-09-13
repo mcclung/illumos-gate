@@ -626,16 +626,16 @@ zvol_remove_minor(const char *name)
 }
 
 int
-zvol_first_open(zvol_state_t *zv)
+zvol_first_open(zvol_state_t *zv, boolean_t rdonly)
 {
 	objset_t *os;
 	uint64_t volsize;
 	int error;
 	uint64_t readonly;
+	boolean_t ro;
 
-	/* lie and say we're read-only */
-	error = dmu_objset_own(zv->zv_name, DMU_OST_ZVOL, B_TRUE, B_TRUE,
-	    zvol_tag, &os);
+	ro = (rdonly || (strchr(zv->zv_name, '@') != NULL));
+	error = dmu_objset_own(zv->zv_name, DMU_OST_ZVOL, ro, B_TRUE, zv, &os);
 	if (error)
 		return (error);
 
@@ -901,17 +901,13 @@ zvol_open(dev_t *devp, int flag, int otyp, cred_t *cr)
 	}
 
 	if (zv->zv_total_opens == 0)
-		err = zvol_first_open(zv);
+		err = zvol_first_open(zv, !(flag & FWRITE));
 	if (err) {
 		mutex_exit(&zfsdev_state_lock);
 		return (err);
 	}
-	/*
-	 * Check for a bad on-disk format version now since we
-	 * lied about owning the dataset readonly before.
-	 */
-	if ((flag & FWRITE) && ((zv->zv_flags & ZVOL_RDONLY) ||
-	    dmu_objset_incompatible_encryption_version(zv->zv_objset))) {
+
+	if ((flag & FWRITE) && (zv->zv_flags & ZVOL_RDONLY)) {
 		err = SET_ERROR(EROFS);
 		goto out;
 	}
@@ -1663,7 +1659,7 @@ zvol_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 {
 	zvol_state_t *zv;
 	struct dk_callback *dkc;
-	int error = 0;
+	int i, error = 0;
 	locked_range_t *lr;
 
 	mutex_enter(&zfsdev_state_lock);
@@ -1888,6 +1884,15 @@ zvol_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 
 		return (error);
 	}
+
+	case DKIOC_CANFREE:
+		i = zvol_unmap_enabled ? 1 : 0;
+		if (ddi_copyout(&i, (void *)arg, sizeof (int), flag) != 0) {
+			error = EFAULT;
+		} else {
+			error = 0;
+		}
+		break;
 
 	default:
 		error = SET_ERROR(ENOTTY);

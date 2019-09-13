@@ -363,8 +363,10 @@ CCNOAUTOINLINE= \
 	-_gcc=-fno-ipa-cp \
 	-_gcc7=-fno-ipa-icf \
 	-_gcc8=-fno-ipa-icf \
+	-_gcc9=-fno-ipa-icf \
 	-_gcc7=-fno-clone-functions \
-	-_gcc8=-fno-clone-functions
+	-_gcc8=-fno-clone-functions \
+	-_gcc9=-fno-clone-functions
 
 # GCC may put functions in different named sub-sections of .text based on
 # their presumed calling frequency.  At least in the kernel, where we actually
@@ -374,7 +376,8 @@ CCNOAUTOINLINE= \
 # but the application of this may move into usr/src/uts/ in future.
 CCNOREORDER=	\
 	-_gcc7=-fno-reorder-functions \
-	-_gcc8=-fno-reorder-functions
+	-_gcc8=-fno-reorder-functions \
+	-_gcc9=-fno-reorder-functions
 
 #
 # gcc has a rather aggressive optimization on by default that infers loop
@@ -385,7 +388,8 @@ CCNOREORDER=	\
 #
 CCNOAGGRESSIVELOOPS= \
 	-_gcc7=-fno-aggressive-loop-optimizations \
-	-_gcc8=-fno-aggressive-loop-optimizations
+	-_gcc8=-fno-aggressive-loop-optimizations \
+	-_gcc9=-fno-aggressive-loop-optimizations
 
 # One optimization the compiler might perform is to turn this:
 #	#pragma weak foo
@@ -460,6 +464,11 @@ CERRWARN += -_gcc=-Wno-missing-field-initializers
 # Unfortunately, this option can misfire very easily and unfixably.
 CERRWARN +=	-_gcc=-Wno-array-bounds
 
+# gcc4 lacks -Wno-maybe-uninitialized
+CNOWARN_UNINIT = -_gcc4=-Wno-uninitialized \
+    -_gcc7=-Wno-maybe-uninitialized \
+    -_gcc8=-Wno-maybe-uninitialized \
+    -_gcc9=-Wno-maybe-uninitialized
 
 CERRWARN += -_smatch=-p=illumos_user
 include $(SRC)/Makefile.smatch
@@ -628,6 +637,9 @@ NATIVE_CFLAGS=	$(COPTFLAG) $($(NATIVE_MACH)_CFLAGS) $(CCMODE) \
 		$(IROPTFLAG) $(CGLOBALSTATIC) $(CCNOAUTOINLINE) \
 		$(CCNOREORDER) $(CSOURCEDEBUGFLAGS) $(CUSERFLAGS)
 
+NATIVE_CCFLAGS=	$(CCOPTFLAG) $($(NATIVE_MACH)_CCFLAGS) $(CCSOURCEDEBUGFLAGS) \
+		$(CCUSERFLAGS)
+
 DTEXTDOM=-DTEXT_DOMAIN=\"$(TEXT_DOMAIN)\"	# For messaging.
 DTS_ERRNO=-D_TS_ERRNO
 CPPFLAGS.first=	# Please keep empty.  Only lower makefiles should set this.
@@ -667,7 +679,7 @@ BUILD.po= $(XGETTEXT) $(XGETFLAGS) -d $(<F) $<.i ;\
 #
 POFILE= $(PROG).po
 
-sparc_CCFLAGS=		-cg92 -compat=4 \
+sparc_CCFLAGS=		$(sparc_XARCH) -cg92 -compat=4 \
 			-Qoption ccfe -messages=no%anachronism \
 			$(CCERRWARN)
 sparcv9_CCFLAGS=	$(sparcv9_XARCH) -dalign -compat=5 \
@@ -675,7 +687,7 @@ sparcv9_CCFLAGS=	$(sparcv9_XARCH) -dalign -compat=5 \
 			-Qoption ccfe -features=no%conststrings \
 			$(CCCREGSYM) \
 			$(CCERRWARN)
-i386_CCFLAGS=		-compat=4 \
+i386_CCFLAGS=		$(i386_XARCH) -compat=4 \
 			-Qoption ccfe -messages=no%anachronism \
 			-Qoption ccfe -features=no%conststrings \
 			$(CCERRWARN)
@@ -850,6 +862,7 @@ $(__SUNC)PRIMARY_CCC=	studio12,$(SPRO_VROOT)/bin/CC,sun
 CW_CC_COMPILERS=	$(PRIMARY_CC:%=--primary %) $(SHADOW_CCS:%=--shadow %)
 CW_CCC_COMPILERS=	$(PRIMARY_CCC:%=--primary %) $(SHADOW_CCCS:%=--shadow %)
 
+CW_LINKER=		--linker $(LD)
 
 # Till SS12u1 formally becomes the NV CBE, LINT is hard
 # coded to be picked up from the $SPRO_ROOT/sunstudio12.1/
@@ -863,10 +876,10 @@ CW_CCC_COMPILERS=	$(PRIMARY_CCC:%=--primary %) $(SHADOW_CCCS:%=--shadow %)
 #
 CW=			$(ONBLD_TOOLS)/bin/$(MACH)/cw
 
-BUILD_CC=		$(CW) $(CW_CC_COMPILERS) --
-BUILD_CCC=		$(CW) -C $(CW_CCC_COMPILERS) --
+BUILD_CC=		$(CW) $(CW_LINKER) $(CW_CC_COMPILERS) --
+BUILD_CCC=		$(CW) -C $(CW_LINKER) $(CW_CCC_COMPILERS) --
 BUILD_CPP=		/usr/ccs/lib/cpp
-BUILD_LD=		/usr/ccs/bin/ld
+BUILD_LD=		$(ONBLD_TOOLS)/bin/$(MACH)/ld
 BUILD_LINT=		$(SPRO_ROOT)/sunstudio12.1/bin/lint
 
 $(MACH)_CC=		$(BUILD_CC)
@@ -979,15 +992,6 @@ CTFCVTFLAGS=		-L VERSION
 # stripping.
 #
 CTFMRGFLAGS=
-
-#
-# Make the transition between old and new CTF Tools. The new ctf tools
-# do not support stabs (eg. Sun Studio). By setting BUILD_OLD_CTF_TOOLS
-# here or in the environment file, the old ones will be built.
-#
-BUILD_NEW_CTF_TOOLS=
-BUILD_OLD_CTF_TOOLS=$(POUND_SIGN)
-$(BUILD_OLD_CTF_TOOLS)BUILD_NEW_CTF_TOOLS= $(POUND_SIGN)
 
 CTFCONVERT_O		= $(CTFCONVERT) $(CTFCVTFLAGS) $@
 
@@ -1248,8 +1252,3 @@ CPPFORPO=$(COMPILE.cpp:\"$(TEXT_DOMAIN)\"=TEXT_DOMAIN)
 
 .xml.xmlchk:
 	$(MANIFEST_CHECK)
-
-#
-# Include rules to render automated sccs get rules "safe".
-#
-include $(SRC)/Makefile.noget

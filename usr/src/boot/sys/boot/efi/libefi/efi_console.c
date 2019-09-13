@@ -57,7 +57,7 @@ struct efi_console_data {
 };
 
 #define	KEYBUFSZ 10
-static unsigned keybuf[KEYBUFSZ];      /* keybuf for extended codes */
+static unsigned keybuf[KEYBUFSZ];	/* keybuf for extended codes */
 
 static int key_pending;
 
@@ -218,12 +218,12 @@ plat_cons_update_mode(int mode)
 	}
 
 	if (console_control != NULL)
-		(void)console_control->SetMode(console_control, console_mode);
+		(void) console_control->SetMode(console_control, console_mode);
 
 	/* some firmware enables the cursor when switching modes */
 	conout->EnableCursor(conout, FALSE);
 	if (console_mode == EfiConsoleControlScreenText) {
-		(void)conout->QueryMode(conout, conout->Mode->Mode,
+		(void) conout->QueryMode(conout, conout->Mode->Mode,
 		    &cols, &rows);
 		devinit.version = VIS_CONS_REV;
 		devinit.width = cols;
@@ -275,7 +275,7 @@ efi_text_devinit(struct vis_devinit *data)
 	if (console_mode != EfiConsoleControlScreenText)
 		return (1);
 
-	(void)conout->QueryMode(conout, conout->Mode->Mode, &cols, &rows);
+	(void) conout->QueryMode(conout, conout->Mode->Mode, &cols, &rows);
 	data->version = VIS_CONS_REV;
 	data->width = cols;
 	data->height = rows;
@@ -328,7 +328,7 @@ efi_text_cons_display(struct vis_consdisplay *da)
 	tem_char_t *data;
 	int i;
 
-	(void)conout->QueryMode(conout, conout->Mode->Mode, &col, &row);
+	(void) conout->QueryMode(conout, conout->Mode->Mode, &col, &row);
 
 	/* reduce clear line on bottom row by one to prevent autoscroll */
 	if (row - 1 == da->row && da->col == 0 && da->width == col)
@@ -365,6 +365,7 @@ static void efi_cons_cursor(struct vis_conscursor *cc)
 	case VIS_GET_CURSOR: {	/* only used at startup */
 		uint32_t row, col;
 
+		row = col = 0;
 		plat_tem_get_prom_pos(&row, &col);
 		cc->row = row;
 		cc->col = col;
@@ -475,7 +476,7 @@ efi_cons_init(struct console *cp, int arg __unused)
 	memset(keybuf, 0, KEYBUFSZ);
 
 	status = BS->LocateProtocol(&ccontrol_protocol_guid, NULL,
-	    (VOID **)&console_control);
+	    (void **)&console_control);
 	if (status == EFI_SUCCESS) {
 		BOOLEAN GopUgaExists, StdInLocked;
 		status = console_control->GetMode(console_control,
@@ -485,7 +486,7 @@ efi_cons_init(struct console *cp, int arg __unused)
 	}
 
 	max_dim = best_mode = 0;
-	for (i = 0; i <= conout->Mode->MaxMode ; i++) {
+	for (i = 0; i <= conout->Mode->MaxMode; i++) {
 		status = conout->QueryMode(conout, i, &cols, &rows);
 		if (EFI_ERROR(status))
 			continue;
@@ -518,7 +519,7 @@ efi_cons_init(struct console *cp, int arg __unused)
 	}
 
 	if (console_control != NULL)
-		(void)console_control->SetMode(console_control, console_mode);
+		(void) console_control->SetMode(console_control, console_mode);
 
 	/* some firmware enables the cursor when switching modes */
 	conout->EnableCursor(conout, FALSE);
@@ -596,27 +597,30 @@ keybuf_inschar(EFI_INPUT_KEY *key)
 {
 
 	switch (key->ScanCode) {
-	case 0x1: /* UP */
+	case SCAN_UP: /* UP */
 		keybuf[0] = 0x1b;	/* esc */
 		keybuf[1] = '[';
 		keybuf[2] = 'A';
 		break;
-	case 0x2: /* DOWN */
+	case SCAN_DOWN: /* DOWN */
 		keybuf[0] = 0x1b;	/* esc */
 		keybuf[1] = '[';
 		keybuf[2] = 'B';
 		break;
-	case 0x3: /* RIGHT */
+	case SCAN_RIGHT: /* RIGHT */
 		keybuf[0] = 0x1b;	/* esc */
 		keybuf[1] = '[';
 		keybuf[2] = 'C';
 		break;
-	case 0x4: /* LEFT */
+	case SCAN_LEFT: /* LEFT */
 		keybuf[0] = 0x1b;	/* esc */
 		keybuf[1] = '[';
 		keybuf[2] = 'D';
 		break;
-	case 0x17:
+	case SCAN_DELETE:
+		keybuf[0] = CHAR_BACKSPACE;
+		break;
+	case SCAN_ESC:
 		keybuf[0] = 0x1b;	/* esc */
 		break;
 	default:
@@ -742,7 +746,7 @@ efi_cons_efiputchar(int c)
 	EFI_STATUS status;
 
 	buf[0] = c;
-        buf[1] = 0;     /* terminate string */
+	buf[1] = 0;	/* terminate string */
 
 	status = conout->TestString(conout, buf);
 	if (EFI_ERROR(status))
