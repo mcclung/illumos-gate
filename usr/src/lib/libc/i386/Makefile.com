@@ -1277,8 +1277,8 @@ $(LIB_PIC): pics $$(PICS)
 	$(POST_PROCESS_A)
 
 $(LIBCBASE)/crt/_rtbootld.s: $(LIBCBASE)/crt/_rtboot.s $(LIBCBASE)/crt/_rtld.c
-	$(CC) $(CPPFLAGS) -_smatch=off $(CTF_FLAGS) -O -S $(C_PICFLAGS) \
-	    $(LIBCBASE)/crt/_rtld.c -o $(LIBCBASE)/crt/_rtld.s
+	$(CC) $($(MACH)_XARCH) $(CPPFLAGS) -_smatch=off $(CTF_FLAGS) -O -S \
+	    $(C_PICFLAGS) $(LIBCBASE)/crt/_rtld.c -o $(LIBCBASE)/crt/_rtld.s
 	$(CAT) $(LIBCBASE)/crt/_rtboot.s $(LIBCBASE)/crt/_rtld.s > $@
 	$(RM) $(LIBCBASE)/crt/_rtld.s
 
@@ -1302,10 +1302,12 @@ $(ASSYMDEP_OBJS:%=pics/%): assym.h
 # assym.h build rules
 
 GENASSYM_C = $(LIBCDIR)/$(MACH)/genassym.c
+LDFLAGS.native = $(LDASSERTS) $(ZASSERTDEFLIB)=libc.so $(BDIRECT)
 
 genassym: $(GENASSYM_C)
 	$(NATIVECC) $(NATIVE_CFLAGS) -I$(LIBCBASE)/inc -I$(LIBCDIR)/inc	\
-		-D__EXTENSIONS__ $(CPPFLAGS.native) -o $@ $(GENASSYM_C)
+		-D__EXTENSIONS__ $(CPPFLAGS.native) $(LDFLAGS.native) \
+		-o $@ $(GENASSYM_C)
 
 OFFSETS = $(LIBCDIR)/$(MACH)/offsets.in
 
