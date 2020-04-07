@@ -14,11 +14,12 @@
 # Copyright 2020 Joyent, Inc.
 #
 
-SUBDIRS_i386 = i386
+SUBDIRS_i386 = i386 imc
 
 SUBDIRS =       \
 		ddi_ufm \
 		file-locking \
+		libtopo \
 		pf_key \
 		poll \
 		sdevfs \
@@ -27,6 +28,7 @@ SUBDIRS =       \
 		sockfs \
 		spoof-ras \
 		stress \
+		uccid \
 		$(SUBDIRS_$(MACH))
 
 PROGS = \
