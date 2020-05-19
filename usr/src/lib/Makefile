@@ -232,6 +232,7 @@ SUBDIRS +=				\
 	libtsnet	\
 	libtsol		\
 	libumem		\
+	libutempter	\
 	libuuid		\
 	libuutil	\
 	libvolmgt	\
@@ -279,7 +280,8 @@ SUBDIRS +=				\
 
 i386_SUBDIRS=		\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_SUBDIRS=		\
 	efcode		\
@@ -479,6 +481,7 @@ HDRSUBDIRS=				\
 	libtsnet	\
 	libtsol		\
 	libumem		\
+	libutempter	\
 	libuutil	\
 	libvolmgt	\
 	libvrrpadm	\
@@ -502,7 +505,8 @@ HDRSUBDIRS=				\
 
 i386_HDRSUBDIRS=	\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_HDRSUBDIRS=	\
 	libds		\
@@ -545,13 +549,14 @@ install_extra:
 
 clean clobber:		$(NOWAIT_SUBDIRS:%=%-nodepend)
 
-lint:
 
 install_h check:	$(HDRSUBDIRS:%=%-nodepend)
 
 _msg:			$(MSGSUBDIRS:%=%-nodepend) .WAIT _dc
 
 _dc:			$(DCSUBDIRS:%=%-nodepend)
+
+lint:
 
 # Library interdependencies are called out explicitly here.
 ../cmd/sgs/libconv: crt

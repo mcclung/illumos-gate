@@ -71,7 +71,10 @@ typedef struct ctxop {
 	void	(*exit_op)(void *);	/* invoked during {thread,lwp}_exit() */
 	void	(*free_op)(void *, int); /* function which frees the context */
 	void	*arg;		/* argument to above functions, ctx pointer */
-	struct ctxop *next;	/* next context ops */
+	struct ctxop *next;		/* next context ops */
+	struct ctxop *prev;		/* previous context ops */
+	hrtime_t save_ts;		/* timestamp of last save */
+	hrtime_t restore_ts;		/* timestamp of last restore */
 } ctxop_t;
 
 /*
@@ -402,6 +405,7 @@ typedef struct _kthread {
 #define	TP_CHANGEBIND	0x1000	/* thread has a new cpu/cpupart binding */
 #define	TP_ZTHREAD	0x2000	/* this is a kernel thread for a zone */
 #define	TP_WATCHSTOP	0x4000	/* thread is stopping via holdwatch() */
+#define	TP_KTHREAD	0x8000	/* in-kernel worker thread for a process */
 
 /*
  * Thread scheduler flag (t_schedflag) definitions.

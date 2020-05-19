@@ -96,6 +96,7 @@ CHKHDRS=			\
 	bofi.h			\
 	bofi_impl.h		\
 	bpp_io.h		\
+	bootbanner.h		\
 	bootstat.h		\
 	brand.h			\
 	buf.h			\
@@ -838,6 +839,7 @@ FSHDRS=				\
 	decomp.h		\
 	dv_node.h		\
 	sdev_impl.h		\
+	sdev_plugin.h		\
 	fifonode.h		\
 	hsfs_isospec.h		\
 	hsfs_node.h		\
