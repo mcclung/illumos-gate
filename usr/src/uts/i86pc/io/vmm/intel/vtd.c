@@ -44,12 +44,16 @@ __FBSDID("$FreeBSD$");
 #include <machine/vmparam.h>
 #include <contrib/dev/acpica/include/acpi.h>
 
+#include <sys/sunndi.h>
+
 #include "io/iommu.h"
 
 /*
  * Documented in the "Intel Virtualization Technology for Directed I/O",
  * Architecture Spec, September 2008.
  */
+
+#define VTD_DRHD_INCLUDE_PCI_ALL(Flags)  (((Flags) >> 0) & 0x1)
 
 /* Section 10.4 "Register Descriptions" */
 struct vtdmap {
@@ -116,10 +120,14 @@ struct domain {
 static SLIST_HEAD(, domain) domhead;
 
 #define	DRHD_MAX_UNITS	8
-static int		drhd_num;
-static struct vtdmap	*vtdmaps[DRHD_MAX_UNITS];
-static int		max_domains;
-typedef int		(*drhd_ident_func_t)(void);
+static ACPI_DMAR_HARDWARE_UNIT	*drhds[DRHD_MAX_UNITS];
+static int			drhd_num;
+static struct vtdmap		*vtdmaps[DRHD_MAX_UNITS];
+static int			max_domains;
+typedef int			(*drhd_ident_func_t)(void);
+#ifndef __FreeBSD__
+static dev_info_t	*vtddips[DRHD_MAX_UNITS];
+#endif
 
 static uint64_t root_table[PAGE_SIZE / sizeof(uint64_t)] __aligned(4096);
 static uint64_t ctx_tables[256][PAGE_SIZE / sizeof(uint64_t)] __aligned(4096);
@@ -173,6 +181,69 @@ domain_id(void)
 		panic("domain ids exhausted");
 
 	return (id);
+}
+
+static struct vtdmap *
+vtd_device_scope(uint16_t rid)
+{
+	int i, remaining, pathremaining;
+	char *end, *pathend;
+	struct vtdmap *vtdmap;
+	ACPI_DMAR_HARDWARE_UNIT *drhd;
+	ACPI_DMAR_DEVICE_SCOPE *device_scope;
+	ACPI_DMAR_PCI_PATH *path;
+
+	for (i = 0; i < drhd_num; i++) {
+		drhd = drhds[i];
+
+		if (VTD_DRHD_INCLUDE_PCI_ALL(drhd->Flags)) {
+			/*
+			 * From Intel VT-d arch spec, version 3.0:
+			 * If a DRHD structure with INCLUDE_PCI_ALL flag Set is reported
+			 * for a Segment, it must be enumerated by BIOS after all other
+			 * DRHD structures for the same Segment.
+			 */
+			vtdmap = vtdmaps[i];
+			return(vtdmap);
+		}
+
+		end = (char *)drhd + drhd->Header.Length;
+		remaining = drhd->Header.Length - sizeof(ACPI_DMAR_HARDWARE_UNIT);
+		while (remaining > sizeof(ACPI_DMAR_DEVICE_SCOPE)) {
+			device_scope = (ACPI_DMAR_DEVICE_SCOPE *)(end - remaining);
+			remaining -= device_scope->Length;
+
+			switch (device_scope->EntryType){
+				/* 0x01 and 0x02 are PCI device entries */
+				case 0x01:
+				case 0x02:
+					break;
+				default:
+					continue;
+			}
+
+			if (PCI_RID2BUS(rid) != device_scope->Bus)
+				continue;
+
+			pathend = (char *)device_scope + device_scope->Length;
+			pathremaining = device_scope->Length - sizeof(ACPI_DMAR_DEVICE_SCOPE);
+			while (pathremaining >= sizeof(ACPI_DMAR_PCI_PATH)) {
+				path = (ACPI_DMAR_PCI_PATH *)(pathend - pathremaining);
+				pathremaining -= sizeof(ACPI_DMAR_PCI_PATH);
+
+				if (PCI_RID2SLOT(rid) != path->Device)
+					continue;
+				if (PCI_RID2FUNC(rid) != path->Function)
+					continue;
+
+				vtdmap = vtdmaps[i];
+				return (vtdmap);
+			}
+		}
+	}
+
+	/* No matching scope */
+	return (NULL);
 }
 
 static void
@@ -237,19 +308,63 @@ vtd_translation_disable(struct vtdmap *vtdmap)
 		;
 }
 
+static void *
+vtd_map(dev_info_t *dip)
+{
+	caddr_t regs;
+	ddi_acc_handle_t hdl;
+	int error;
+
+	static ddi_device_acc_attr_t regs_attr = {
+		DDI_DEVICE_ATTR_V0,
+		DDI_NEVERSWAP_ACC,
+		DDI_STRICTORDER_ACC,
+	};
+
+	error = ddi_regs_map_setup(dip, 0, &regs, 0, PAGE_SIZE, &regs_attr,
+	    &hdl);
+
+	if (error != DDI_SUCCESS)
+		return (NULL);
+
+	ddi_set_driver_private(dip, hdl);
+
+	return (regs);
+}
+
+static void
+vtd_unmap(dev_info_t *dip)
+{
+	ddi_acc_handle_t hdl = ddi_get_driver_private(dip);
+
+	if (hdl != NULL)
+		ddi_regs_map_free(&hdl);
+}
+
+#ifndef __FreeBSD__
+/*
+ * This lives in vtd_sol.c for license reasons.
+ */
+extern dev_info_t *vtd_get_dip(ACPI_DMAR_HARDWARE_UNIT *, int);
+#endif
+
 static int
 vtd_init(void)
 {
-	int i, units, remaining;
+	int i, units, remaining, tmp;
 	struct vtdmap *vtdmap;
 	vm_paddr_t ctx_paddr;
-	char *end, envname[32];
+	char *end;
+#ifdef __FreeBSD__
+	char envname[32];
 	unsigned long mapaddr;
+#endif
 	ACPI_STATUS status;
 	ACPI_TABLE_DMAR *dmar;
 	ACPI_DMAR_HEADER *hdr;
 	ACPI_DMAR_HARDWARE_UNIT *drhd;
 
+#ifdef __FreeBSD__
 	/*
 	 * Allow the user to override the ACPI DMAR table by specifying the
 	 * physical address of each remapping unit.
@@ -268,7 +383,9 @@ vtd_init(void)
 
 	if (units > 0)
 		goto skip_dmar;
-
+#else
+	units = 0;
+#endif
 	/* Search for DMAR table. */
 	status = AcpiGetTable(ACPI_SIG_DMAR, 0, (ACPI_TABLE_HEADER **)&dmar);
 	if (ACPI_FAILURE(status))
@@ -291,8 +408,16 @@ vtd_init(void)
 			break;
 
 		drhd = (ACPI_DMAR_HARDWARE_UNIT *)hdr;
-		vtdmaps[units++] = (struct vtdmap *)PHYS_TO_DMAP(drhd->Address);
-		if (units >= DRHD_MAX_UNITS)
+		drhds[units] = drhd;
+#ifdef __FreeBSD__
+		vtdmaps[units] = (struct vtdmap *)PHYS_TO_DMAP(drhd->Address);
+#else
+		vtddips[units] = vtd_get_dip(drhd, units);
+		vtdmaps[units] = (struct vtdmap *)vtd_map(vtddips[units]);
+		if (vtdmaps[units] == NULL)
+			goto fail;
+#endif
+		if (++units >= DRHD_MAX_UNITS)
 			break;
 		remaining -= hdr->Length;
 	}
@@ -300,14 +425,22 @@ vtd_init(void)
 	if (units <= 0)
 		return (ENXIO);
 
+#ifdef __FreeBSD__
 skip_dmar:
+#endif
 	drhd_num = units;
-	vtdmap = vtdmaps[0];
 
-	if (VTD_CAP_CM(vtdmap->cap) != 0)
-		panic("vtd_init: invalid caching mode");
+	max_domains = 64 * 1024; /* maximum valid value */
+	for (i = 0; i < drhd_num; i++){
+		vtdmap = vtdmaps[i];
 
-	max_domains = vtd_max_domains(vtdmap);
+		if (VTD_CAP_CM(vtdmap->cap) != 0)
+			panic("vtd_init: invalid caching mode");
+
+		/* take most compatible (minimum) value */
+		if ((tmp = vtd_max_domains(vtdmap)) < max_domains)
+			max_domains = tmp;
+	}
 
 	/*
 	 * Set up the root-table to point to the context-entry tables
@@ -321,11 +454,36 @@ skip_dmar:
 	}
 
 	return (0);
+
+#ifndef __FreeBSD__
+fail:
+	for (i = 0; i <= units; i++)
+		vtd_unmap(vtddips[i]);
+	return (ENXIO);
+#endif
 }
 
 static void
 vtd_cleanup(void)
 {
+#ifndef __FreeBSD__
+	int i;
+
+	KASSERT(SLIST_EMPTY(&domhead), ("domain list not empty"));
+
+	bzero(root_table, sizeof (root_table));
+
+	for (i = 0; i <= drhd_num; i++) {
+		vtdmaps[i] = NULL;
+		/*
+		 * Unmap the vtd registers. Note that the devinfo nodes
+		 * themselves aren't removed, they are considered system state
+		 * and can be reused when the module is reloaded.
+		 */
+		if (vtddips[i] != NULL)
+			vtd_unmap(vtddips[i]);
+	}
+#endif
 }
 
 static void
@@ -373,7 +531,6 @@ vtd_add_device(void *arg, uint16_t rid)
 	struct vtdmap *vtdmap;
 	uint8_t bus;
 
-	vtdmap = vtdmaps[0];
 	bus = PCI_RID2BUS(rid);
 	ctxp = ctx_tables[bus];
 	pt_paddr = vtophys(dom->ptp);
@@ -384,6 +541,10 @@ vtd_add_device(void *arg, uint16_t rid)
 		      "domain %d", rid,
 		      (uint16_t)(ctxp[idx + 1] >> 8));
 	}
+
+	if ((vtdmap = vtd_device_scope(rid)) == NULL)
+		panic("vtd_add_device: device %x is not in scope for "
+		      "any DMA remapping unit", rid);
 
 	/*
 	 * Order is important. The 'present' bit is set only after all fields
@@ -568,8 +729,6 @@ vtd_create_domain(vm_paddr_t maxaddr)
 	if (drhd_num <= 0)
 		panic("vtd_create_domain: no dma remapping hardware available");
 
-	vtdmap = vtdmaps[0];
-
 	/*
 	 * Calculate AGAW.
 	 * Section 3.4.2 "Adjusted Guest Address Width", Architecture Spec.
@@ -594,7 +753,14 @@ vtd_create_domain(vm_paddr_t maxaddr)
 	pt_levels = 2;
 	sagaw = 30;
 	addrwidth = 0;
-	tmp = VTD_CAP_SAGAW(vtdmap->cap);
+
+	tmp = ~0;
+	for (i = 0; i < drhd_num; i++) {
+		vtdmap = vtdmaps[i];
+		/* take most compatible value */
+		tmp &= VTD_CAP_SAGAW(vtdmap->cap);
+	}
+
 	for (i = 0; i < 5; i++) {
 		if ((tmp & (1 << i)) != 0 && sagaw >= agaw)
 			break;
@@ -606,8 +772,8 @@ vtd_create_domain(vm_paddr_t maxaddr)
 	}
 
 	if (i >= 5) {
-		panic("vtd_create_domain: SAGAW 0x%lx does not support AGAW %d",
-		      VTD_CAP_SAGAW(vtdmap->cap), agaw);
+		panic("vtd_create_domain: SAGAW 0x%x does not support AGAW %d",
+		      tmp, agaw);
 	}
 
 	dom = malloc(sizeof(struct domain), M_VTD, M_ZERO | M_WAITOK);
@@ -619,6 +785,7 @@ vtd_create_domain(vm_paddr_t maxaddr)
 	if ((uintptr_t)dom->ptp & PAGE_MASK)
 		panic("vtd_create_domain: ptp (%p) not page aligned", dom->ptp);
 
+#ifdef __FreeBSD__
 #ifdef notyet
 	/*
 	 * XXX superpage mappings for the iommu do not work correctly.
@@ -633,6 +800,23 @@ vtd_create_domain(vm_paddr_t maxaddr)
 	 *
 	 * There is not any code to deal with the demotion at the moment
 	 * so we disable superpage mappings altogether.
+	 */
+	dom->spsmask = ~0;
+	for (i = 0; i < drhd_num; i++) {
+		vtdmap = vtdmaps[i];
+		/* take most compatible value */
+		dom->spsmask &= VTD_CAP_SPS(vtdmap->cap);
+	}
+#endif
+#else
+	/*
+	 * On illumos we decidedly do not remove memory mapped to a VM's domain
+	 * from the host_domain, so we don't have to deal with page demotion and
+	 * can just use large pages.
+	 *
+	 * Since VM memory is currently allocated as 4k pages and mapped into
+	 * the VM domain page by page, the use of large pages is essentially
+	 * limited to the host_domain.
 	 */
 	dom->spsmask = VTD_CAP_SPS(vtdmap->cap);
 #endif

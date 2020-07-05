@@ -88,11 +88,14 @@ __FBSDID("$FreeBSD$");
 #include "acpi.h"
 #include "atkbdc.h"
 #include "console.h"
+#include "bootrom.h"
 #include "inout.h"
 #include "dbgport.h"
+#include "debug.h"
 #include "fwctl.h"
 #include "gdb.h"
 #include "ioapic.h"
+#include "kernemu_dev.h"
 #include "mem.h"
 #include "mevent.h"
 #include "mptbl.h"
@@ -105,6 +108,7 @@ __FBSDID("$FreeBSD$");
 #include "rfb.h"
 #include "rtc.h"
 #include "vga.h"
+#include "vmgenc.h"
 
 #define GUEST_NIO_PORT		0x488	/* guest upcalls via i/o port */
 
@@ -188,6 +192,9 @@ uint16_t cores, maxcpus, sockets, threads;
 
 char *guest_uuid_str;
 
+int raw_stdio = 0;
+
+static int gdb_port = 0;
 static int guest_vmexit_on_hlt, guest_vmexit_on_pause;
 static int virtio_msix = 1;
 static int x2apic_mode = 0;	/* default is xAPIC */
@@ -199,13 +206,6 @@ static int acpi;
 
 static char *progname;
 static const int BSP = 0;
-
-#ifndef	__FreeBSD__
-int bcons_wait = 0;
-int bcons_connected = 0;
-pthread_mutex_t bcons_wait_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t bcons_wait_done = PTHREAD_COND_INITIALIZER;
-#endif
 
 static cpuset_t cpumask;
 
@@ -251,6 +251,9 @@ usage(int code)
 		"       -A: create ACPI tables\n"
 		"       -c: number of cpus and/or topology specification\n"
 		"       -C: include guest memory in core file\n"
+#ifndef __FreeBSD__
+	        "       -d: suspend cpu at boot\n"
+#endif
 		"       -e: exit on unhandled I/O access\n"
 		"       -g: gdb port\n"
 		"       -h: help\n"
@@ -433,7 +436,6 @@ pincpu_parse(const char *opt)
 	CPU_SET(pcpu, vcpumap[vcpu]);
 	return (0);
 }
-#endif
 
 void
 vm_inject_fault(void *arg, int vcpu, int vector, int errcode_valid,
@@ -449,6 +451,7 @@ vm_inject_fault(void *arg, int vcpu, int vector, int errcode_valid,
 	    restart_instruction);
 	assert(error == 0);
 }
+#endif /* __FreeBSD__ */
 
 void *
 paddr_guest2host(struct vmctx *ctx, uintptr_t gaddr, size_t len)
@@ -491,7 +494,8 @@ fbsdrun_start_thread(void *param)
 	snprintf(tname, sizeof(tname), "vcpu %d", vcpu);
 	pthread_set_name_np(mtp->mt_thr, tname);
 
-	gdb_cpu_add(vcpu);
+	if (gdb_port != 0)
+		gdb_cpu_add(vcpu);
 
 	vm_loop(mtp->mt_ctx, vcpu, vmexit[vcpu].rip);
 
@@ -500,8 +504,14 @@ fbsdrun_start_thread(void *param)
 	return (NULL);
 }
 
+#ifdef __FreeBSD__
 void
 fbsdrun_addcpu(struct vmctx *ctx, int fromcpu, int newcpu, uint64_t rip)
+#else
+void
+fbsdrun_addcpu(struct vmctx *ctx, int fromcpu, int newcpu, uint64_t rip,
+    bool suspend)
+#endif
 {
 	int error;
 
@@ -518,6 +528,11 @@ fbsdrun_addcpu(struct vmctx *ctx, int fromcpu, int newcpu, uint64_t rip)
 		err(EX_OSERR, "could not activate CPU %d", newcpu);
 
 	CPU_SET_ATOMIC(newcpu, &cpumask);
+
+#ifndef __FreeBSD__
+	if (suspend)
+		(void) vm_suspend_cpu(ctx, newcpu);
+#endif
 
 	/*
 	 * Set up the vmexit struct to allow execution to start
@@ -765,8 +780,11 @@ vmexit_mtrap(struct vmctx *ctx, struct vm_exit *vmexit, int *pvcpu)
 
 	stats.vmexit_mtrap++;
 
+	if (gdb_port == 0) {
+		fprintf(stderr, "vm_loop: unexpected VMEXIT_MTRAP\n");
+		exit(4);
+	}
 	gdb_cpu_mtrap(*pvcpu);
-
 	return (VMEXIT_CONTINUE);
 }
 
@@ -784,16 +802,14 @@ vmexit_inst_emul(struct vmctx *ctx, struct vm_exit *vmexit, int *pvcpu)
 
 	if (err) {
 		if (err == ESRCH) {
-			fprintf(stderr, "Unhandled memory access to 0x%lx\n",
+			EPRINTLN("Unhandled memory access to 0x%lx\n",
 			    vmexit->u.inst_emul.gpa);
 		}
 
-		fprintf(stderr, "Failed to emulate instruction [");
-		for (i = 0; i < vie->num_valid; i++) {
-			fprintf(stderr, "0x%02x%s", vie->inst[i],
-			    i != (vie->num_valid - 1) ? " " : "");
-		}
-		fprintf(stderr, "] at 0x%lx\n", vmexit->rip);
+		fprintf(stderr, "Failed to emulate instruction sequence [ ");
+		for (i = 0; i < vie->num_valid; i++)
+			fprintf(stderr, "%02x", vie->inst[i]);
+		FPRINTLN(stderr, " ] at 0x%lx", vmexit->rip);
 		return (VMEXIT_ABORT);
 	}
 
@@ -845,7 +861,23 @@ static int
 vmexit_debug(struct vmctx *ctx, struct vm_exit *vmexit, int *pvcpu)
 {
 
+	if (gdb_port == 0) {
+		fprintf(stderr, "vm_loop: unexpected VMEXIT_DEBUG\n");
+		exit(4);
+	}
 	gdb_cpu_suspend(*pvcpu);
+	return (VMEXIT_CONTINUE);
+}
+
+static int
+vmexit_breakpoint(struct vmctx *ctx, struct vm_exit *vmexit, int *pvcpu)
+{
+
+	if (gdb_port == 0) {
+		fprintf(stderr, "vm_loop: unexpected VMEXIT_DEBUG\n");
+		exit(4);
+	}
+	gdb_cpu_breakpoint(*pvcpu, vmexit);
 	return (VMEXIT_CONTINUE);
 }
 
@@ -864,6 +896,7 @@ static vmexit_handler_t handler[VM_EXITCODE_MAX] = {
 	[VM_EXITCODE_SUSPENDED] = vmexit_suspend,
 	[VM_EXITCODE_TASK_SWITCH] = vmexit_task_switch,
 	[VM_EXITCODE_DEBUG] = vmexit_debug,
+	[VM_EXITCODE_BPT] = vmexit_breakpoint,
 };
 
 static void
@@ -1053,10 +1086,13 @@ do_open(const char *vmname)
 int
 main(int argc, char *argv[])
 {
-	int c, error, dbg_port, gdb_port, err, bvmcons;
+	int c, error, dbg_port, err, bvmcons;
 	int max_vcpus, mptgen, memflags;
 	int rtc_localtime;
 	bool gdb_stop;
+#ifndef __FreeBSD__
+	bool suspend = false;
+#endif
 	struct vmctx *ctx;
 	uint64_t rip;
 	size_t memsize;
@@ -1065,7 +1101,6 @@ main(int argc, char *argv[])
 	bvmcons = 0;
 	progname = basename(argv[0]);
 	dbg_port = 0;
-	gdb_port = 0;
 	gdb_stop = false;
 	guest_ncpus = 1;
 	sockets = cores = threads = 1;
@@ -1078,7 +1113,7 @@ main(int argc, char *argv[])
 #ifdef	__FreeBSD__
 	optstr = "abehuwxACHIPSWYp:g:G:c:s:m:l:B:U:";
 #else
-	optstr = "abehuwxACHIPSWYg:G:c:s:m:l:B:U:";
+	optstr = "abdehuwxACHIPSWYg:G:c:s:m:l:B:U:";
 #endif
 	while ((c = getopt(argc, argv, optstr)) != -1) {
 		switch (c) {
@@ -1097,7 +1132,11 @@ main(int argc, char *argv[])
 				    "configuration '%s'", optarg);
 			}
 			break;
-#ifdef	__FreeBSD__
+#ifndef	__FreeBSD__
+		case 'd':
+			suspend = true;
+			break;
+#else
 		case 'p':
 			if (pincpu_parse(optarg) != 0) {
 				errx(EX_USAGE, "invalid vcpu pinning "
@@ -1237,6 +1276,10 @@ main(int argc, char *argv[])
 
 	init_mem();
 	init_inout();
+#ifdef	__FreeBSD__
+	kernemu_dev_init();
+#endif
+	init_bootrom(ctx);
 	atkbdc_init(ctx);
 	pci_irq_init(ctx);
 	ioapic_init(ctx);
@@ -1251,6 +1294,13 @@ main(int argc, char *argv[])
 		perror("device emulation initialization error");
 		exit(4);
 	}
+
+	/*
+	 * Initialize after PCI, to allow a bootrom file to reserve the high
+	 * region.
+	 */
+	if (acpi)
+		vmgenc_init(ctx);
 
 	if (dbg_port != 0)
 		init_dbgport(dbg_port);
@@ -1313,26 +1363,14 @@ main(int argc, char *argv[])
 		errx(EX_OSERR, "cap_enter() failed");
 #endif
 
-#ifndef	__FreeBSD__
-	/*
-	 * If applicable, wait for bhyveconsole
-	 */
-	if (bcons_wait) {
-		printf("Waiting for bhyveconsole connection...\n");
-		(void) pthread_mutex_lock(&bcons_wait_lock);
-		while (!bcons_connected) {
-			(void) pthread_cond_wait(&bcons_wait_done,
-			    &bcons_wait_lock);
-		}
-		(void) pthread_mutex_unlock(&bcons_wait_lock);
-	}
-#endif
-
 	/*
 	 * Add CPU 0
 	 */
+#ifdef __FreeBSD__
 	fbsdrun_addcpu(ctx, BSP, BSP, rip);
-
+#else
+	fbsdrun_addcpu(ctx, BSP, BSP, rip, suspend);
+#endif
 	/*
 	 * Head off to the main event dispatch loop
 	 */

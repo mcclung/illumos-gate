@@ -46,6 +46,9 @@
 
 #include <sys/param.h>
 #include <sys/cpuset.h>
+#include <x86/segments.h>
+
+#include <stdbool.h>
 
 /*
  * API version for out-of-tree consumers like grub-bhyve for making compile
@@ -114,6 +117,13 @@ int	vm_mmap_getnext(struct vmctx *ctx, vm_paddr_t *gpa, int *segid,
 void	*vm_create_devmem(struct vmctx *ctx, int segid, const char *name,
 	    size_t len);
 
+#ifndef __FreeBSD__
+/*
+ * Return the map offset for the device memory segment 'segid'.
+ */
+int	vm_get_devmem_offset(struct vmctx *ctx, int segid, off_t *mapoff);
+#endif
+
 /*
  * Map the memory segment identified by 'segid' into the guest address space
  * at [gpa,gpa+len) with protection 'prot'.
@@ -124,6 +134,9 @@ int	vm_mmap_memseg(struct vmctx *ctx, vm_paddr_t gpa, int segid,
 int	vm_create(const char *name);
 int	vm_get_device_fd(struct vmctx *ctx);
 struct vmctx *vm_open(const char *name);
+#ifndef __FreeBSD__
+void	vm_close(struct vmctx *ctx);
+#endif
 void	vm_destroy(struct vmctx *ctx);
 int	vm_parse_memsize(const char *optarg, size_t *memsize);
 int	vm_setup_memory(struct vmctx *ctx, size_t len, enum vm_mmap_style s);
@@ -158,6 +171,27 @@ int	vm_reinit(struct vmctx *ctx);
 int	vm_apicid2vcpu(struct vmctx *ctx, int apicid);
 int	vm_inject_exception(struct vmctx *ctx, int vcpu, int vector,
     int errcode_valid, uint32_t errcode, int restart_instruction);
+#ifndef __FreeBSD__
+void	vm_inject_fault(struct vmctx *ctx, int vcpu, int vector,
+    int errcode_valid, int errcode);
+
+static __inline void
+vm_inject_gp(struct vmctx *ctx, int vcpuid)
+{
+	vm_inject_fault(ctx, vcpuid, IDT_GP, 1, 0);
+}
+
+static __inline void
+vm_inject_ac(struct vmctx *ctx, int vcpuid, int errcode)
+{
+	vm_inject_fault(ctx, vcpuid, IDT_AC, 1, errcode);
+}
+static __inline void
+vm_inject_ss(struct vmctx *ctx, int vcpuid, int errcode)
+{
+	vm_inject_fault(ctx, vcpuid, IDT_SS, 1, errcode);
+}
+#endif
 int	vm_lapic_irq(struct vmctx *ctx, int vcpu, int vector);
 int	vm_lapic_local_irq(struct vmctx *ctx, int vcpu, int vector);
 int	vm_lapic_msi(struct vmctx *ctx, uint64_t addr, uint64_t msg);
@@ -165,6 +199,8 @@ int	vm_ioapic_assert_irq(struct vmctx *ctx, int irq);
 int	vm_ioapic_deassert_irq(struct vmctx *ctx, int irq);
 int	vm_ioapic_pulse_irq(struct vmctx *ctx, int irq);
 int	vm_ioapic_pincount(struct vmctx *ctx, int *pincount);
+int	vm_readwrite_kernemu_device(struct vmctx *ctx, int vcpu,
+	    vm_paddr_t gpa, bool write, int size, uint64_t *value);
 int	vm_isa_assert_irq(struct vmctx *ctx, int atpic_irq, int ioapic_irq);
 int	vm_isa_deassert_irq(struct vmctx *ctx, int atpic_irq, int ioapic_irq);
 int	vm_isa_pulse_irq(struct vmctx *ctx, int atpic_irq, int ioapic_irq);
@@ -177,6 +213,7 @@ int	vm_get_capability(struct vmctx *ctx, int vcpu, enum vm_cap_type cap,
 			  int *retval);
 int	vm_set_capability(struct vmctx *ctx, int vcpu, enum vm_cap_type cap,
 			  int val);
+#ifdef __FreeBSD__
 int	vm_assign_pptdev(struct vmctx *ctx, int bus, int slot, int func);
 int	vm_unassign_pptdev(struct vmctx *ctx, int bus, int slot, int func);
 int	vm_map_pptdev_mmio(struct vmctx *ctx, int bus, int slot, int func,
@@ -186,6 +223,20 @@ int	vm_setup_pptdev_msi(struct vmctx *ctx, int vcpu, int bus, int slot,
 int	vm_setup_pptdev_msix(struct vmctx *ctx, int vcpu, int bus, int slot,
 	    int func, int idx, uint64_t addr, uint64_t msg,
 	    uint32_t vector_control);
+int	vm_get_pptdev_limits(struct vmctx *ctx, int bus, int slot, int func,
+    int *msi_limit, int *msix_limit);
+#else /* __FreeBSD__ */
+int	vm_assign_pptdev(struct vmctx *ctx, int pptfd);
+int	vm_unassign_pptdev(struct vmctx *ctx, int pptfd);
+int	vm_map_pptdev_mmio(struct vmctx *ctx, int pptfd, vm_paddr_t gpa,
+    size_t len, vm_paddr_t hpa);
+int	vm_setup_pptdev_msi(struct vmctx *ctx, int vcpu, int pptfd,
+    uint64_t addr, uint64_t msg, int numvec);
+int	vm_setup_pptdev_msix(struct vmctx *ctx, int vcpu, int pptfd,
+    int idx, uint64_t addr, uint64_t msg, uint32_t vector_control);
+int	vm_get_pptdev_limits(struct vmctx *ctx, int pptfd, int *msi_limit,
+    int *msix_limit);
+#endif /* __FreeBSD__ */
 
 int	vm_get_intinfo(struct vmctx *ctx, int vcpu, uint64_t *i1, uint64_t *i2);
 int	vm_set_intinfo(struct vmctx *ctx, int vcpu, uint64_t exit_intinfo);

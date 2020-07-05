@@ -280,7 +280,9 @@ SUBDIRS +=				\
 
 i386_SUBDIRS=		\
 	libfdisk	\
+	libppt		\
 	libsaveargs	\
+	libvmm		\
 	libvmmapi
 
 sparc_SUBDIRS=		\
@@ -505,7 +507,9 @@ HDRSUBDIRS=				\
 
 i386_HDRSUBDIRS=	\
 	libfdisk	\
+	libppt		\
 	libsaveargs	\
+	libvmm		\
 	libvmmapi
 
 sparc_HDRSUBDIRS=	\
@@ -657,6 +661,7 @@ libpctx:	libproc
 libpkg:		libscf libadm
 libpool:	libscf libexacct
 libpp:		libast
+libppt:		libpcidb libdevinfo libcmdutils
 libproc:	../cmd/sgs/librtld_db ../cmd/sgs/libelf libctf
 $(INTEL_BLD)libproc: libsaveargs
 libproject:	libpool libproc libsecdb
@@ -691,6 +696,7 @@ libtsnet:	libtsol libsecdb
 libtsol:	libsecdb
 libuuid:	libdlpi
 libv12n:	libds libuuid
+libvmm:		libvmmapi
 libvolmgt:	libadm
 libvrrpadm:	libdladm libscf
 libvscan:	libscf libsecdb

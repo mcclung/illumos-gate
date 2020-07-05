@@ -164,7 +164,7 @@ struct mem_map {
 	int		prot;
 	int		flags;
 };
-#define	VM_MAX_MEMMAPS	4
+#define	VM_MAX_MEMMAPS	8
 
 /*
  * Initialization:
@@ -243,7 +243,8 @@ static MALLOC_DEFINE(M_VM, "vm", "vm");
 /* statistics */
 static VMM_STAT(VCPU_TOTAL_RUNTIME, "vcpu total runtime");
 
-SYSCTL_NODE(_hw, OID_AUTO, vmm, CTLFLAG_RW, NULL, NULL);
+SYSCTL_NODE(_hw, OID_AUTO, vmm, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    NULL);
 
 /*
  * Halt the guest if all vcpus are executing a HLT instruction with
@@ -410,7 +411,7 @@ vmm_init(void)
 
 	if (vmm_is_intel())
 		ops = &vmm_ops_intel;
-	else if (vmm_is_amd())
+	else if (vmm_is_svm())
 		ops = &vmm_ops_amd;
 	else
 		return (ENXIO);
@@ -495,6 +496,7 @@ vmm_mod_unload()
 {
 	int	error;
 
+	iommu_cleanup();
 	error = VMM_CLEANUP();
 	if (error)
 		return (error);
@@ -1007,7 +1009,7 @@ vmm_sysmem_maxaddr(struct vm *vm)
 }
 
 static void
-vm_iommu_modify(struct vm *vm, boolean_t map)
+vm_iommu_modify(struct vm *vm, bool map)
 {
 	int i, sz;
 	vm_paddr_t gpa, hpa;
@@ -1054,10 +1056,14 @@ vm_iommu_modify(struct vm *vm, boolean_t map)
 			hpa = DMAP_TO_PHYS((uintptr_t)vp);
 			if (map) {
 				iommu_create_mapping(vm->iommu, gpa, hpa, sz);
+#ifdef __FreeBSD__
 				iommu_remove_mapping(host_domain, hpa, sz);
+#endif
 			} else {
 				iommu_remove_mapping(vm->iommu, gpa, sz);
+#ifdef __FreeBSD__
 				iommu_create_mapping(host_domain, hpa, hpa, sz);
+#endif
 			}
 
 			gpa += PAGE_SIZE;
@@ -1068,21 +1074,34 @@ vm_iommu_modify(struct vm *vm, boolean_t map)
 	 * Invalidate the cached translations associated with the domain
 	 * from which pages were removed.
 	 */
+#ifdef __FreeBSD__
 	if (map)
 		iommu_invalidate_tlb(host_domain);
 	else
 		iommu_invalidate_tlb(vm->iommu);
+#else
+	iommu_invalidate_tlb(vm->iommu);
+#endif
 }
 
-#define	vm_iommu_unmap(vm)	vm_iommu_modify((vm), FALSE)
-#define	vm_iommu_map(vm)	vm_iommu_modify((vm), TRUE)
+#define	vm_iommu_unmap(vm)	vm_iommu_modify((vm), false)
+#define	vm_iommu_map(vm)	vm_iommu_modify((vm), true)
 
+#ifdef __FreeBSD__
 int
 vm_unassign_pptdev(struct vm *vm, int bus, int slot, int func)
+#else
+int
+vm_unassign_pptdev(struct vm *vm, int pptfd)
+#endif /* __FreeBSD__ */
 {
 	int error;
 
+#ifdef __FreeBSD__
 	error = ppt_unassign_device(vm, bus, slot, func);
+#else
+	error = ppt_unassign_device(vm, pptfd);
+#endif /* __FreeBSD__ */
 	if (error)
 		return (error);
 
@@ -1092,8 +1111,13 @@ vm_unassign_pptdev(struct vm *vm, int bus, int slot, int func)
 	return (0);
 }
 
+#ifdef __FreeBSD__
 int
 vm_assign_pptdev(struct vm *vm, int bus, int slot, int func)
+#else
+int
+vm_assign_pptdev(struct vm *vm, int pptfd)
+#endif /* __FreeBSD__ */
 {
 	int error;
 	vm_paddr_t maxaddr;
@@ -1109,7 +1133,11 @@ vm_assign_pptdev(struct vm *vm, int bus, int slot, int func)
 		vm_iommu_map(vm);
 	}
 
+#ifdef __FreeBSD__
 	error = ppt_assign_device(vm, bus, slot, func);
+#else
+	error = ppt_assign_device(vm, pptfd);
+#endif /* __FreeBSD__ */
 	return (error);
 }
 
@@ -1166,9 +1194,7 @@ vm_gpa_release(void *cookie)
 {
 	vm_page_t m = cookie;
 
-	vm_page_lock(m);
-	vm_page_unhold(m);
-	vm_page_unlock(m);
+	vm_page_unwire(m, PQ_ACTIVE);
 }
 
 int
@@ -1207,20 +1233,20 @@ vm_set_register(struct vm *vm, int vcpuid, int reg, uint64_t val)
 	return (0);
 }
 
-static boolean_t
+static bool
 is_descriptor_table(int reg)
 {
 
 	switch (reg) {
 	case VM_REG_GUEST_IDTR:
 	case VM_REG_GUEST_GDTR:
-		return (TRUE);
+		return (true);
 	default:
-		return (FALSE);
+		return (false);
 	}
 }
 
-static boolean_t
+static bool
 is_segment_register(int reg)
 {
 	
@@ -1233,9 +1259,9 @@ is_segment_register(int reg)
 	case VM_REG_GUEST_GS:
 	case VM_REG_GUEST_TR:
 	case VM_REG_GUEST_LDTR:
-		return (TRUE);
+		return (true);
 	default:
-		return (FALSE);
+		return (false);
 	}
 }
 
@@ -1652,51 +1678,89 @@ static int
 vm_handle_suspend(struct vm *vm, int vcpuid, bool *retu)
 {
 #ifdef __FreeBSD__
-	int i, done;
+	int error, i;
 	struct vcpu *vcpu;
+	struct thread *td;
 
-	done = 0;
+	error = 0;
+	vcpu = &vm->vcpu[vcpuid];
+	td = curthread;
 #else
 	int i;
 	struct vcpu *vcpu;
-#endif
+
 	vcpu = &vm->vcpu[vcpuid];
+#endif
 
 	CPU_SET_ATOMIC(vcpuid, &vm->suspended_cpus);
 
+#ifdef __FreeBSD__
 	/*
 	 * Wait until all 'active_cpus' have suspended themselves.
+	 *
+	 * Since a VM may be suspended at any time including when one or
+	 * more vcpus are doing a rendezvous we need to call the rendezvous
+	 * handler while we are waiting to prevent a deadlock.
 	 */
 	vcpu_lock(vcpu);
-	while (1) {
+	while (error == 0) {
 		if (CPU_CMP(&vm->suspended_cpus, &vm->active_cpus) == 0) {
 			VCPU_CTR0(vm, vcpuid, "All vcpus suspended");
 			break;
 		}
 
-		VCPU_CTR0(vm, vcpuid, "Sleeping during suspend");
-		vcpu_require_state_locked(vm, vcpuid, VCPU_SLEEPING);
-#ifdef __FreeBSD__
-		msleep_spin(vcpu, &vcpu->mtx, "vmsusp", hz);
+		if (vm->rendezvous_func == NULL) {
+			VCPU_CTR0(vm, vcpuid, "Sleeping during suspend");
+			vcpu_require_state_locked(vm, vcpuid, VCPU_SLEEPING);
+			msleep_spin(vcpu, &vcpu->mtx, "vmsusp", hz);
+			vcpu_require_state_locked(vm, vcpuid, VCPU_FROZEN);
+			if ((td->td_flags & TDF_NEEDSUSPCHK) != 0) {
+				vcpu_unlock(vcpu);
+				error = thread_check_susp(td, false);
+				vcpu_lock(vcpu);
+			}
+		} else {
+			VCPU_CTR0(vm, vcpuid, "Rendezvous during suspend");
+			vcpu_unlock(vcpu);
+			error = vm_handle_rendezvous(vm, vcpuid);
+			vcpu_lock(vcpu);
+		}
+	}
+	vcpu_unlock(vcpu);
 #else
+	vcpu_lock(vcpu);
+	while (1) {
+		int rc;
+
+		if (CPU_CMP(&vm->suspended_cpus, &vm->active_cpus) == 0) {
+			VCPU_CTR0(vm, vcpuid, "All vcpus suspended");
+			break;
+		}
+
+		vcpu_require_state_locked(vm, vcpuid, VCPU_SLEEPING);
+		rc = cv_reltimedwait_sig(&vcpu->vcpu_cv, &vcpu->mtx.m, hz,
+		    TR_CLOCK_TICK);
+		vcpu_require_state_locked(vm, vcpuid, VCPU_FROZEN);
+
 		/*
-		 * To prevent vm_handle_suspend from becoming stuck in the
-		 * kernel if the bhyve process driving its vCPUs is killed,
-		 * offer a bail-out, even though not all the vCPUs have reached
-		 * the suspended state.
+		 * If the userspace process driving the instance is killed, any
+		 * vCPUs yet to be marked suspended (because they are not
+		 * VM_RUN-ing in the kernel presently) will never reach that
+		 * state.
+		 *
+		 * To avoid vm_handle_suspend() getting stuck in the kernel
+		 * waiting for those vCPUs, offer a bail-out even though it
+		 * means returning without all vCPUs in a suspended state.
 		 */
-		if (cv_reltimedwait_sig(&vcpu->vcpu_cv, &vcpu->mtx.m,
-		    hz, TR_CLOCK_TICK) <= 0) {
+		if (rc <= 0) {
 			if ((curproc->p_flag & SEXITING) != 0) {
-				vcpu_require_state_locked(vm, vcpuid,
-				    VCPU_FROZEN);
 				break;
 			}
 		}
-#endif
-		vcpu_require_state_locked(vm, vcpuid, VCPU_FROZEN);
 	}
 	vcpu_unlock(vcpu);
+
+#endif
 
 	/*
 	 * Wakeup the other sleeping vcpus and return to userspace.
@@ -1750,7 +1814,7 @@ vm_suspend(struct vm *vm, enum vm_suspend_how how)
 	if (how <= VM_SUSPEND_NONE || how >= VM_SUSPEND_LAST)
 		return (EINVAL);
 
-	if (atomic_cmpset_int((uint_t *)&vm->suspend, 0, how) == 0) {
+	if (atomic_cmpset_int(&vm->suspend, 0, how) == 0) {
 		VM_CTR2(vm, "virtual machine already suspended %d/%d",
 		    vm->suspend, how);
 		return (EALREADY);
@@ -2089,6 +2153,10 @@ restart:
 			break;
 		}
 
+		case VM_EXITCODE_MTRAP:
+			vm_suspend_cpu(vm, vcpuid);
+			retu = true;
+			break;
 #endif
 		default:
 			retu = true;	/* handled in userland */
@@ -2422,18 +2490,38 @@ vm_inject_exception(struct vm *vm, int vcpuid, int vector, int errcode_valid,
 }
 
 void
-vm_inject_fault(void *vmarg, int vcpuid, int vector, int errcode_valid,
+vm_inject_fault(struct vm *vm, int vcpuid, int vector, int errcode_valid,
     int errcode)
 {
-	struct vm *vm;
-	int error, restart_instruction;
-
-	vm = vmarg;
-	restart_instruction = 1;
+	int error;
 
 	error = vm_inject_exception(vm, vcpuid, vector, errcode_valid,
-	    errcode, restart_instruction);
+	    errcode, 1);
 	KASSERT(error == 0, ("vm_inject_exception error %d", error));
+}
+
+void
+vm_inject_ud(struct vm *vm, int vcpuid)
+{
+	vm_inject_fault(vm, vcpuid, IDT_UD, 0, 0);
+}
+
+void
+vm_inject_gp(struct vm *vm, int vcpuid)
+{
+	vm_inject_fault(vm, vcpuid, IDT_GP, 1, 0);
+}
+
+void
+vm_inject_ac(struct vm *vm, int vcpuid, int errcode)
+{
+	vm_inject_fault(vm, vcpuid, IDT_AC, 1, errcode);
+}
+
+void
+vm_inject_ss(struct vm *vm, int vcpuid, int errcode)
+{
+	vm_inject_fault(vm, vcpuid, IDT_SS, 1, errcode);
 }
 
 void
@@ -2591,12 +2679,12 @@ vm_hpet(struct vm *vm)
 }
 
 #ifdef	__FreeBSD__
-boolean_t
+bool
 vmm_is_pptdev(int bus, int slot, int func)
 {
-	int found, i, n;
-	int b, s, f;
+	int b, f, i, n, s;
 	char *val, *cp, *cp2;
+	bool found;
 
 	/*
 	 * XXX
@@ -2610,7 +2698,7 @@ vmm_is_pptdev(int bus, int slot, int func)
 	const char *names[] = { "pptdevs", "pptdevs2", "pptdevs3", NULL };
 
 	/* set pptdevs="1/2/3 4/5/6 7/8/9 10/11/12" */
-	found = 0;
+	found = false;
 	for (i = 0; names[i] != NULL && !found; i++) {
 		cp = val = kern_getenv(names[i]);
 		while (cp != NULL && *cp != '\0') {
@@ -2619,7 +2707,7 @@ vmm_is_pptdev(int bus, int slot, int func)
 
 			n = sscanf(cp, "%d/%d/%d", &b, &s, &f);
 			if (n == 3 && bus == b && slot == s && func == f) {
-				found = 1;
+				found = true;
 				break;
 			}
 		
