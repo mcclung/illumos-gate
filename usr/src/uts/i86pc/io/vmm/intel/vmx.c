@@ -1947,10 +1947,11 @@ vmexit_inout(struct vm_exit *vmexit, struct vie *vie, uint64_t qual,
 		inst_info = vmcs_read(VMCS_EXIT_INSTRUCTION_INFO);
 
 		/*
-		 * Bits 7-9 encode the address size of ins/outs operations where
-		 * the 0/1/2 values correspond to 16/32/64 bit sizes.
+		 * According to the SDM, bits 9:7 encode the address size of the
+		 * ins/outs operation, but only values 0/1/2 are expected,
+		 * corresponding to 16/32/64 bit sizes.
 		 */
-		inout->addrsize = 2 << (1 + ((inst_info >> 7) & 0x3));
+		inout->addrsize = 2 << BITX(inst_info, 9, 7);
 		VERIFY(inout->addrsize == 2 || inout->addrsize == 4 ||
 		    inout->addrsize == 8);
 
@@ -2250,7 +2251,7 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 	struct vie *vie;
 	struct vlapic *vlapic;
 	struct vm_task_switch *ts;
-	uint32_t eax, ecx, edx, idtvec_info, idtvec_err, intr_info, inst_info;
+	uint32_t eax, ecx, edx, idtvec_info, idtvec_err, intr_info;
 	uint32_t intr_type, intr_vec, reason;
 	uint64_t exitintinfo, qual, gpa;
 	bool retu;
@@ -2795,7 +2796,7 @@ vmx_exit_handle_nmi(struct vmx *vmx, int vcpuid, struct vm_exit *vmexit)
 static __inline void
 vmx_dr_enter_guest(struct vmxctx *vmxctx)
 {
-	register_t rflags;
+	uint64_t rflags;
 
 	/* Save host control debug registers. */
 	vmxctx->host_dr7 = rdr7();
@@ -2860,7 +2861,7 @@ vmx_dr_leave_guest(struct vmxctx *vmxctx)
 }
 
 static int
-vmx_run(void *arg, int vcpu, register_t rip, pmap_t pmap,
+vmx_run(void *arg, int vcpu, uint64_t rip, pmap_t pmap,
     struct vm_eventinfo *evinfo)
 {
 	int rc, handled, launched;
@@ -3133,7 +3134,7 @@ vmx_vmcleanup(void *arg)
 	return;
 }
 
-static register_t *
+static uint64_t *
 vmxctx_regptr(struct vmxctx *vmxctx, int reg)
 {
 	switch (reg) {
@@ -3190,7 +3191,7 @@ vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval)
 {
 	int running, hostcpu, err;
 	struct vmx *vmx = arg;
-	register_t *regp;
+	uint64_t *regp;
 
 	running = vcpu_is_running(vmx->vm, vcpu, &hostcpu);
 	if (running && hostcpu != curcpu)
@@ -3233,7 +3234,7 @@ vmx_setreg(void *arg, int vcpu, int reg, uint64_t val)
 {
 	int running, hostcpu, error;
 	struct vmx *vmx = arg;
-	register_t *regp;
+	uint64_t *regp;
 
 	running = vcpu_is_running(vmx->vm, vcpu, &hostcpu);
 	if (running && hostcpu != curcpu)

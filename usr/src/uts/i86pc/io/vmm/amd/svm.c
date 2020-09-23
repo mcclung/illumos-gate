@@ -527,11 +527,23 @@ vmcb_init(struct svm_softc *sc, int vcpu, uint64_t iopm_base_pa,
 	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_MONITOR);
 	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_MWAIT);
 
+	/* Intercept privileged invalidation instructions. */
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INVD);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL1_INTCPT, VMCB_INTCPT_INVLPGA);
+
 	/*
+	 * Intercept all virtualization-related instructions.
+	 *
 	 * From section "Canonicalization and Consistency Checks" in APMv2
 	 * the VMRUN intercept bit must be set to pass the consistency check.
 	 */
 	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMRUN);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMMCALL);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMLOAD);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_VMSAVE);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_STGI);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_CLGI);
+	svm_enable_intercept(sc, vcpu, VMCB_CTRL2_INTCPT, VMCB_INTCPT_SKINIT);
 
 	/*
 	 * The ASID will be set to a non-zero value just before VMRUN.
@@ -1461,6 +1473,31 @@ svm_vmexit(struct svm_softc *svm_sc, int vcpu, struct vm_exit *vmexit)
 		handled = svm_handle_inout(svm_sc, vcpu, vmexit);
 		vmm_stat_incr(svm_sc->vm, vcpu, VMEXIT_INOUT, 1);
 		break;
+	case VMCB_EXIT_SHUTDOWN:
+		vm_suspend(svm_sc->vm, VM_SUSPEND_TRIPLEFAULT);
+		handled = 1;
+		break;
+	case VMCB_EXIT_INVD:
+	case VMCB_EXIT_INVLPGA:
+		/* privileged invalidation instructions */
+		vm_inject_ud(svm_sc->vm, vcpu);
+		handled = 1;
+		break;
+	case VMCB_EXIT_VMRUN:
+	case VMCB_EXIT_VMLOAD:
+	case VMCB_EXIT_VMSAVE:
+	case VMCB_EXIT_STGI:
+	case VMCB_EXIT_CLGI:
+	case VMCB_EXIT_SKINIT:
+		/* privileged vmm instructions */
+		vm_inject_ud(svm_sc->vm, vcpu);
+		handled = 1;
+		break;
+	case VMCB_EXIT_VMMCALL:
+		/* No handlers make use of VMMCALL for now */
+		vm_inject_ud(svm_sc->vm, vcpu);
+		handled = 1;
+		break;
 	case VMCB_EXIT_CPUID:
 		vmm_stat_incr(svm_sc->vm, vcpu, VMEXIT_CPUID, 1);
 		handled = x86_emulate_cpuid(svm_sc->vm, vcpu, &state->rax,
@@ -1937,7 +1974,7 @@ svm_dr_leave_guest(struct svm_regctx *gctx)
  * Start vcpu with specified RIP.
  */
 static int
-svm_vmrun(void *arg, int vcpu, register_t rip, pmap_t pmap,
+svm_vmrun(void *arg, int vcpu, uint64_t rip, pmap_t pmap,
 	struct vm_eventinfo *evinfo)
 {
 	struct svm_regctx *gctx;
@@ -2121,7 +2158,7 @@ svm_vmcleanup(void *arg)
 	free(sc, M_SVM);
 }
 
-static register_t *
+static uint64_t *
 swctx_regptr(struct svm_regctx *regctx, int reg)
 {
 	switch (reg) {
@@ -2171,7 +2208,7 @@ svm_getreg(void *arg, int vcpu, int ident, uint64_t *val)
 {
 	struct svm_softc *sc;
 	struct vmcb *vmcb;
-	register_t *regp;
+	uint64_t *regp;
 	uint64_t *fieldp;
 	struct vmcb_segment *seg;
 
@@ -2233,7 +2270,7 @@ svm_setreg(void *arg, int vcpu, int ident, uint64_t val)
 {
 	struct svm_softc *sc;
 	struct vmcb *vmcb;
-	register_t *regp;
+	uint64_t *regp;
 	uint64_t *fieldp;
 	uint32_t dirty;
 	struct vmcb_segment *seg;
