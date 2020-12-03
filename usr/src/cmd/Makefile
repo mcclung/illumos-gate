@@ -489,6 +489,7 @@ i386_SUBDIRS=		\
 	acpihpd		\
 	addbadsec	\
 	ahciem		\
+	amdzen		\
 	bhyve		\
 	bhyvectl	\
 	biosdev		\

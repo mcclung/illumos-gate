@@ -12,6 +12,7 @@
 /*
  * Copyright 2016 Toomas Soome <tsoome@me.com>
  * Copyright 2019 OmniOS Community Edition (OmniOSce) Association.
+ * Copyright 2020 RackTop Systems, Inc.
  */
 
 /*
@@ -247,10 +248,7 @@ gfx_set_colors(struct env_var *ev, int flags, const void *value)
 	if (value == NULL)
 		return (CMD_OK);
 
-	if (gfx_fb.framebuffer_common.framebuffer_bpp < 24)
-		limit = 7;
-	else
-		limit = 255;
+	limit = 255;
 
 	if (color_name_to_ansi(value, &val)) {
 		snprintf(buf, sizeof (buf), "%d", val);
@@ -262,18 +260,16 @@ gfx_set_colors(struct env_var *ev, int flags, const void *value)
 		val = (int)strtol(value, &end, 0);
 		if (errno != 0 || *end != '\0') {
 			printf("Allowed values are either ansi color name or "
-			    "number from range [0-7]%s.\n",
-			    limit == 7 ? "" : " or [16-255]");
+			    "number from range [0-255].\n");
 			return (CMD_OK);
 		}
 		evalue = value;
 	}
 
 	/* invalid value? */
-	if ((val < 0 || val > limit) || (val > 7 && val < 16)) {
+	if ((val < 0 || val > limit)) {
 		printf("Allowed values are either ansi color name or "
-		    "number from range [0-7]%s.\n",
-		    limit == 7 ? "" : " or [16-255]");
+		    "number from range [0-255].\n");
 		return (CMD_OK);
 	}
 
@@ -1125,14 +1121,17 @@ gfx_term_drawrect(uint32_t ux1, uint32_t uy1, uint32_t ux2, uint32_t uy2)
 	width = vf_width / 4;			/* line width */
 	xshift = (vf_width - width) / 2;
 	yshift = (vf_height - width) / 2;
-	/* Terminal coordinates start from (1,1) */
-	ux1--;
-	uy1--;
+
+	/* Shift coordinates */
+	if (ux1 != 0)
+		ux1--;
+	if (uy1 != 0)
+		uy1--;
 	ux2--;
 	uy2--;
 
 	/* mark area used in tem */
-	tem_image_display(tems.ts_active, uy1 - 1, ux1 - 1, uy2, ux2);
+	tem_image_display(tems.ts_active, uy1, ux1, uy2 + 1, ux2 + 1);
 
 	/*
 	 * Draw horizontal lines width points thick, shifted from outer edge.
@@ -1198,10 +1197,6 @@ gfx_term_drawrect(uint32_t ux1, uint32_t uy1, uint32_t ux2, uint32_t uy2)
 	for (i = 0; i <= width; i++)
 		gfx_fb_bezier(x1, y1 - i, x2 + i, y1 - i, x2 + i, y2, width-i);
 }
-
-#define	FL_PUTIMAGE_BORDER	0x1
-#define	FL_PUTIMAGE_NOSCROLL	0x2
-#define	FL_PUTIMAGE_DEBUG	0x80
 
 int
 gfx_fb_putimage(png_t *png, uint32_t ux1, uint32_t uy1, uint32_t ux2,
@@ -1328,10 +1323,10 @@ gfx_fb_putimage(png_t *png, uint32_t ux1, uint32_t uy1, uint32_t ux2,
 	 */
 	if (!(flags & FL_PUTIMAGE_NOSCROLL)) {
 		tem_image_display(tems.ts_active,
-		    da.row / tems.ts_font.vf_height - 1,
-		    da.col / tems.ts_font.vf_width - 1,
-		    (da.row + da.height) / tems.ts_font.vf_height - 1,
-		    (da.col + da.width) / tems.ts_font.vf_width - 1);
+		    da.row / tems.ts_font.vf_height,
+		    da.col / tems.ts_font.vf_width,
+		    (da.row + da.height) / tems.ts_font.vf_height,
+		    (da.col + da.width) / tems.ts_font.vf_width);
 	}
 
 	if ((flags & FL_PUTIMAGE_BORDER))
